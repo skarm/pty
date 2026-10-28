@@ -31,6 +31,14 @@ terminal, err := pty.Open()
 - `SetMode(Mode) error` — configure echo and canonical input before Start on
   Linux and macOS; other platforms return `ErrUnsupported`.
 - `Close() error` — release terminal resources; repeated calls are safe.
+- `WriteContext(ctx, []byte) (int, error)` — cancel one input write without
+  closing the terminal or killing its process; queued writers also observe ctx.
+- `Interrupt(ctx) error` — send SIGINT to the Unix foreground process group, or
+  Ctrl+C input through Windows ConPTY. With Windows processed input disabled,
+  the application receives the Ctrl+C byte instead of a console control event.
+- `SendEOF(ctx) (int, error)` — send the current canonical EOF character on Unix.
+  Raw mode, a disabled EOF character and Windows ConPTY return `ErrUnsupported`.
+  This operation does not close input or output and does not substitute Ctrl+Z.
 
 `Command` contains `Path`, `Args`, `Dir` and `Env`. `Args` excludes the program
 name. Arguments are passed directly; use an explicit shell command when shell
@@ -107,6 +115,20 @@ For an interactive application, service input and output concurrently with
 `terminal.Write` and `terminal.Read`. The caller owns any input reader: a reader
 that can block indefinitely, such as stdin, needs its own cancellation strategy.
 Forward resize notifications by calling `terminal.Resize` with the new size.
+Use `WriteContext` when an individual input operation needs cancellation.
+`Write`, `WriteContext`, `Interrupt` and `SendEOF` are serialized independently
+of output reads. An expired or canceled queued operation does not reach input.
+Partial input writes return the reported byte count and are not rolled back;
+do not automatically resend them. A write completed concurrently with
+cancellation may return success. Canceling an input operation leaves the
+terminal available for subsequent writes.
+
+`Interrupt` requests interruption and does not guarantee process exit.
+`SendEOF` writes one configured character; when a Unix canonical line buffer is
+nonempty, that can deliver the pending line without ending input. Windows has
+no equivalent canonical EOF operation in ConPTY: Ctrl+Z interpretation depends
+on the client application, so the library returns `ErrUnsupported` without
+sending input.
 
 ## Lifecycle
 
@@ -130,6 +152,9 @@ Windows 10 1809 / Windows Server 2019 or later. Rows and columns must be between
 both to be zero. Windows Size returns the last successfully requested size,
 since ConPTY does not expose a size query. Windows output is UTF-8 with virtual
 terminal escape sequences.
+The host owns overlapped pipe endpoints opened through Go and verifies deadline
+support before Open succeeds; failure to register with the runtime poller is
+returned as an error.
 
 On Darwin, Open requires a pollable master and fails if Go's poller cannot
 register it. Close can interrupt an outstanding read even while the child holds

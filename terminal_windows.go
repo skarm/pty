@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -95,6 +96,36 @@ func (t *windowsTerminal) Read(buf []byte) (int, error) {
 }
 
 func (t *windowsTerminal) Write(buf []byte) (int, error) { return t.input.Write(buf) }
+
+func (t *windowsTerminal) SetWriteDeadline(deadline time.Time) error {
+	return t.input.SetWriteDeadline(deadline)
+}
+
+func (t *windowsTerminal) interrupt() error {
+	t.mu.Lock()
+	closed, started := t.closed.Load(), t.started
+	t.mu.Unlock()
+
+	if closed {
+		return os.ErrClosed
+	}
+
+	if !started {
+		return os.ErrInvalid
+	}
+
+	_, err := t.input.Write([]byte{3})
+
+	return err
+}
+
+func (t *windowsTerminal) eofByte() (byte, error) {
+	if t.closed.Load() {
+		return 0, os.ErrClosed
+	}
+
+	return 0, ErrUnsupported
+}
 
 func (t *windowsTerminal) Resize(size Winsize) error {
 	t.mu.Lock()
@@ -193,50 +224,45 @@ func conptyPipe(hostReads bool) (*os.File, windows.Handle, error) {
 
 	attributes := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor}
 
-	direction, access := uint32(windows.PIPE_ACCESS_OUTBOUND), uint32(windows.GENERIC_READ)
+	// ConPTY owns the synchronous server; Go opens the overlapped client itself
+	// so the runtime owns its completion modes and registers it with IOCP.
+	direction, access := uint32(windows.PIPE_ACCESS_INBOUND), os.O_WRONLY
 	if hostReads {
-		direction, access = windows.PIPE_ACCESS_INBOUND, windows.GENERIC_WRITE
+		direction, access = windows.PIPE_ACCESS_OUTBOUND, os.O_RDONLY
 	}
 
 	server, err := windows.CreateNamedPipe(name16,
-		direction|windows.FILE_FLAG_OVERLAPPED|windows.FILE_FLAG_FIRST_PIPE_INSTANCE,
+		direction|windows.FILE_FLAG_FIRST_PIPE_INSTANCE,
 		windows.PIPE_TYPE_BYTE|windows.PIPE_READMODE_BYTE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS,
 		1, 65536, 65536, 0, &attributes)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	client, err := windows.CreateFile(name16, access, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	// #nosec G304 -- name is a freshly generated local pipe name with a private DACL.
+	host, err := os.OpenFile(name, access|int(windows.O_FILE_FLAG_OVERLAPPED), 0)
 	if err != nil {
 		_ = windows.CloseHandle(server)
 		return nil, 0, err
 	}
-	// CreateFile connected the client before ConnectNamedPipe, so
+
+	// OpenFile connected the client before ConnectNamedPipe, so
 	// ERROR_PIPE_CONNECTED is a successful connection, not an error.
-	event, err := windows.CreateEvent(nil, 1, 0, nil)
-	if err != nil {
-		_ = windows.CloseHandle(client)
-		_ = windows.CloseHandle(server)
-
-		return nil, 0, err
-	}
-	defer func() { _ = windows.CloseHandle(event) }()
-
-	overlapped := windows.Overlapped{HEvent: event}
-
-	err = windows.ConnectNamedPipe(server, &overlapped)
-	if errors.Is(err, windows.ERROR_IO_PENDING) {
-		var transferred uint32
-
-		err = windows.GetOverlappedResult(server, &overlapped, &transferred, true)
-	}
-
-	if err != nil && !errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
-		_ = windows.CloseHandle(client)
+	if err := windows.ConnectNamedPipe(server, nil); err != nil && !errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
+		_ = host.Close()
 		_ = windows.CloseHandle(server)
 
 		return nil, 0, err
 	}
 
-	return os.NewFile(uintptr(server), name), client, nil
+	// OpenFile may silently leave a handle unregistered if IOCP setup fails.
+	// Refuse it now: cancellation and Close require a pollable host endpoint.
+	if err := host.SetDeadline(time.Time{}); err != nil {
+		_ = host.Close()
+		_ = windows.CloseHandle(server)
+
+		return nil, 0, fmt.Errorf("ConPTY host pipe is not pollable: %w", err)
+	}
+
+	return host, server, nil
 }

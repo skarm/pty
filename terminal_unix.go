@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 )
 
 type unixTerminal struct {
@@ -77,6 +78,10 @@ func (t *unixTerminal) Read(buf []byte) (int, error) {
 }
 
 func (t *unixTerminal) Write(buf []byte) (int, error) { return t.master.Write(buf) }
+
+func (t *unixTerminal) SetWriteDeadline(deadline time.Time) error {
+	return t.master.SetWriteDeadline(deadline)
+}
 
 func (t *unixTerminal) Resize(size Winsize) error {
 	t.mu.Lock()

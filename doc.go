@@ -19,6 +19,13 @@
 // can include virtual terminal escape sequences. The caller owns any external
 // input reader and must arrange cancellation if that reader can block.
 //
+// [Terminal.WriteContext] cancels an individual input operation without closing
+// the terminal or killing its process, and reports partial writes without replay.
+// [Terminal.Interrupt] sends Unix foreground SIGINT or Windows ConPTY Ctrl+C
+// input. [Terminal.SendEOF] sends the current Unix canonical EOF character;
+// Windows ConPTY and Unix raw input return [ErrUnsupported]. Input operations
+// are serialized independently of output reads.
+//
 // [Process.Wait] reports the exit state independently of output consumption.
 // It may be called repeatedly or concurrently. The child is reaped in the
 // background even when Wait is not called. [Process.Kill] terminates the child;

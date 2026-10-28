@@ -4,6 +4,8 @@ package pty
 
 import (
 	"bytes"
+	"errors"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -64,6 +66,54 @@ func TestCloseConsoleOutput(t *testing.T) {
 			}
 			if tc.flush && (writeErr != nil || int(written) != len(payload)) {
 				t.Fatalf("final flush: wrote %d of %d bytes: %v", written, len(payload), writeErr)
+			}
+		})
+	}
+}
+
+func TestConPTYPipeDeadlines(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		hostReads bool
+	}{{"input", false}, {"output", true}} {
+		t.Run(test.name, func(t *testing.T) {
+			host, peer, err := conptyPipe(test.hostReads)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = host.Close(); _ = windows.CloseHandle(peer) })
+			if err := host.SetDeadline(time.Now().Add(-time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			var buffer [16]byte
+			var n int
+			if test.hostReads {
+				n, err = host.Read(buffer[:])
+			} else {
+				n, err = host.Write([]byte("blocked"))
+			}
+			if n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("expired deadline: n=%d err=%v", n, err)
+			}
+			if err := host.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			payload := []byte("still open")
+			var transferred uint32
+			if test.hostReads {
+				if err := windows.WriteFile(peer, payload, &transferred, nil); err != nil || int(transferred) != len(payload) {
+					t.Fatalf("peer write after deadline: n=%d err=%v", transferred, err)
+				}
+				n, err = host.Read(buffer[:])
+			} else {
+				if n, err := host.Write(payload); err != nil || n != len(payload) {
+					t.Fatalf("host write after deadline: n=%d err=%v", n, err)
+				}
+				err = windows.ReadFile(peer, buffer[:], &transferred, nil)
+				n = int(transferred)
+			}
+			if err != nil || !bytes.Equal(buffer[:n], payload) {
+				t.Fatalf("I/O after deadline: data=%q err=%v", buffer[:n], err)
 			}
 		})
 	}
