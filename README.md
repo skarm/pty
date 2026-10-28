@@ -1,107 +1,140 @@
 # pty
 
-Pty is a Go package for using unix pseudo-terminals.
+A Go library for Unix pseudo-terminals and Windows ConPTY, with one
+`Terminal` / `Process` API.
+
+This repository is a fork of [creack/pty](https://github.com/creack/pty).
+It uses the import path `github.com/skarm/pty` and retains the upstream
+[MIT license](LICENSE).
 
 ## Install
 
+Requires Go 1.26 or later.
+
 ```sh
-go get github.com/creack/pty
+go get github.com/skarm/pty
 ```
 
-## Examples
+## API
 
-Note that those examples are for demonstration purpose only, to showcase how to use the library. They are not meant to be used in any kind of production environment.
+```go
+terminal, err := pty.Open()
+```
 
-### Command
+`Open()` creates a terminal with 80 columns and 24 rows. Call `Resize` before
+`Start` when the child needs a different initial size. `Terminal` implements
+`io.ReadWriteCloser` and has:
+
+- `Start(ctx, Command) (*Process, error)` — attach one child process.
+- `Resize(Winsize) error` — change terminal dimensions.
+- `Size() (Winsize, error)` — read the current dimensions.
+- `Close() error` — release terminal resources; repeated calls are safe.
+
+`Command` contains `Path`, `Args`, `Dir` and `Env`. `Args` excludes the program
+name. Arguments are passed directly; use an explicit shell command when shell
+syntax is needed. A nil `Env` inherits the parent environment; a non-nil slice
+replaces it. Windows preserves required `SYSTEMROOT`. Use absolute paths for
+Windows drive-relative executable names. Environment entries containing NUL
+are rejected; Windows also rejects malformed name=value entries.
+
+`Process` provides `PID() int`, `Kill() error` and
+`Wait() (*os.ProcessState, error)`. Wait is safe to call repeatedly or
+concurrently. A nonzero exit status returns an `*exec.ExitError`. The library
+reaps the child even if Wait is not called.
+
+## Example
+
+This program runs a command that finishes without interactive input and copies
+its terminal output to stdout. Pass the executable and its arguments on the
+program's command line.
 
 ```go
 package main
 
 import (
-	"io"
-	"os"
-	"os/exec"
+    "context"
+    "errors"
+    "io"
+    "log"
+    "os"
+    "os/signal"
 
-	"github.com/creack/pty"
+    "github.com/skarm/pty"
 )
 
-func main() {
-	c := exec.Command("grep", "--color=auto", "bar")
-	f, err := pty.Start(c)
-	if err != nil {
-		panic(err)
-	}
+func run(ctx context.Context, args []string) error {
+    if len(args) == 0 {
+        return errors.New("usage: terminal <program> [args...]")
+    }
+    terminal, err := pty.Open()
+    if err != nil {
+        return err
+    }
+    defer func() { _ = terminal.Close() }()
 
-	go func() {
-		f.Write([]byte("foo\n"))
-		f.Write([]byte("bar\n"))
-		f.Write([]byte("baz\n"))
-		f.Write([]byte{4}) // EOT
-	}()
-	io.Copy(os.Stdout, f)
-}
-```
-
-### Shell
-
-```go
-package main
-
-import (
-        "io"
-        "log"
-        "os"
-        "os/exec"
-        "os/signal"
-        "syscall"
-
-        "github.com/creack/pty"
-        "golang.org/x/term"
-)
-
-func test() error {
-        // Create arbitrary command.
-        c := exec.Command("bash")
-
-        // Start the command with a pty.
-        ptmx, err := pty.Start(c)
-        if err != nil {
-                return err
-        }
-        // Make sure to close the pty at the end.
-        defer func() { _ = ptmx.Close() }() // Best effort.
-
-        // Handle pty size.
-        ch := make(chan os.Signal, 1)
-        signal.Notify(ch, syscall.SIGWINCH)
-        go func() {
-                for range ch {
-                        if err := pty.InheritSize(os.Stdin, ptmx); err != nil {
-                                log.Printf("error resizing pty: %s", err)
-                        }
-                }
-        }()
-        ch <- syscall.SIGWINCH // Initial resize.
-        defer func() { signal.Stop(ch); close(ch) }() // Cleanup signals when done.
-
-        // Set stdin in raw mode.
-        oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-        if err != nil {
-                panic(err)
-        }
-        defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }() // Best effort.
-
-        // Copy stdin to the pty and the pty to stdout.
-        // NOTE: The goroutine will keep reading until the next keystroke before returning.
-        go func() { _, _ = io.Copy(ptmx, os.Stdin) }()
-        _, _ = io.Copy(os.Stdout, ptmx)
-
-        return nil
+    process, err := terminal.Start(ctx, pty.Command{
+        Path: args[0],
+        Args: args[1:],
+    })
+    if err != nil {
+        return err
+    }
+    _, readErr := io.Copy(os.Stdout, terminal)
+    if readErr != nil {
+        _ = process.Kill()
+    }
+    _, waitErr := process.Wait()
+    return errors.Join(readErr, waitErr, terminal.Close())
 }
 
 func main() {
-        if err := test(); err != nil {
-                log.Fatal(err)
-        }
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+    defer stop()
+    if err := run(ctx, os.Args[1:]); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
+
+For an interactive application, service input and output concurrently with
+`terminal.Write` and `terminal.Read`. The caller owns any input reader: a reader
+that can block indefinitely, such as stdin, needs its own cancellation strategy.
+Forward resize notifications by calling `terminal.Resize` with the new size.
+
+## Lifecycle
+
+A terminal permits one successful Start. A failed Start may be retried.
+Canceling its context while the child is running kills the child and closes the
+terminal. After the child exits, use Close to abort any remaining output I/O.
+Kill terminates the child process; it does not replace closing the terminal.
+
+Wait reports the process result independently of output consumption. Read to
+EOF before Close to preserve all final output. Close discards unread output.
+Always close the terminal, including when Start fails.
+
+## Platforms
+
+Unix uses native PTYs; Windows uses ConPTY without CGO. Windows requires
+Windows 10 1809 / Windows Server 2019 or later. Rows and columns must be between
+1 and 32767. Pixel dimensions (`X`, `Y`) are available on Unix; Windows requires
+both to be zero. Windows Size returns the last successfully requested size,
+since ConPTY does not expose a size query. Windows output is UTF-8 with virtual
+terminal escape sequences.
+
+On Darwin, terminal I/O is blocking. Close may wait for an outstanding read to
+finish. Process exit or cancellation normally releases a read when the child
+owns the last slave descriptor.
+
+Plan 9 and AIX return `ErrUnsupported`.
+
+## Checks
+
+CI is configured for Go 1.26 and 1.27 on Linux, macOS, Windows Server 2022 and
+Windows Server 2025. It includes lint, vet, race checks, repeated lifecycle tests
+and a Linux GC stack-shrink regression. Cross-build checks cover the remaining
+targets in `test_crosscompile.sh`.
+
+Runtime tests have run on macOS and Linux ARM64, FreeBSD/OpenBSD/NetBSD ARM64
+VMs, DragonFly BSD x86-64 under QEMU, and Windows 11 ARM64. Windows amd64 and
+386 test binaries have also run under Windows ARM64 emulation. The Windows
+Server CI jobs above have not been run from this fork yet.

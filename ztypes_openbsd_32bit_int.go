@@ -10,4 +10,4 @@ type ptmget struct {
 	Sn  [16]int8
 }
 
-var ioctl_PTMGET = 0x40287401
+const ioctlPTMGET = 0x40287401

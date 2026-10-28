@@ -11,7 +11,7 @@ type ptmget struct {
 	Sn  [1024]int8
 }
 
-var (
-	ioctl_TIOCPTSNAME = 0x48087448
-	ioctl_TIOCGRANTPT = 0x20007447
+const (
+	ioctlTIOCPTSNAME = 0x48087448
+	ioctlTIOCGRANTPT = 0x20007447
 )

@@ -1,19 +1,49 @@
----
 name: Crosscompile
 
-"on":
+on:
   push:
-    branches:
-      - master
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GOTOOLCHAIN: local
 
 jobs:
   test:
-    name: Run ./test_crosscompile.sh
     runs-on: ubuntu-latest
-
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: '0'
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Run ./test_crosscompile.sh
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: Go environment
+        run: |
+          go version
+          go env GOOS GOARCH CGO_ENABLED GOTOOLCHAIN
+      # Includes the Windows ConPTY backend and compile-only Plan 9/AIX stubs.
+      - name: Cross-build current targets
         run: ./test_crosscompile.sh

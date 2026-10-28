@@ -13,6 +13,3 @@
 
 TEXT ·sysvicall6(SB),NOSPLIT,$0-88
 	JMP	syscall·sysvicall6(SB)
-
-TEXT ·rawSysvicall6(SB),NOSPLIT,$0-88
-	JMP	syscall·rawSysvicall6(SB)

@@ -11,18 +11,14 @@ import (
 )
 
 const (
-	SYS_UNLOCKPT     = 0x37B
-	SYS_GRANTPT      = 0x37A
-	SYS_POSIX_OPENPT = 0xC66
-	SYS_FCNTL        = 0x18C
-	SYS___PTSNAME_A  = 0x718
+	sysUnlockpt    = 0x37B
+	sysGrantpt     = 0x37A
+	sysPosixOpenpt = 0xC66
+	sysFcntl       = 0x18C
+	sysPtsname     = 0x718
 
-	SETCVTON = 1
-
-	O_NONBLOCK = 0x04
-
-	F_SETFL       = 4
-	F_CONTROL_CVT = 13
+	setCvtOn    = 1
+	fControlCvt = 13
 )
 
 type f_cnvrt struct {
@@ -38,8 +34,9 @@ func open() (pty, tty *os.File, err error) {
 	}
 
 	// Needed for z/OS so that the characters are not garbled if ptyp* is untagged
-	cvtreq := f_cnvrt{Cvtcmd: SETCVTON, Pccsid: 0, Fccsid: 1047}
-	if _, err = fcntl(uintptr(ptmxfd), F_CONTROL_CVT, uintptr(unsafe.Pointer(&cvtreq))); err != nil {
+	cvtreq := f_cnvrt{Cvtcmd: setCvtOn, Pccsid: 0, Fccsid: 1047}
+	if _, err = fcntl(uintptr(ptmxfd), fControlCvt, uintptr(unsafe.Pointer(&cvtreq))); err != nil {
+		_ = syscall.Close(ptmxfd) // No os.File owns this descriptor yet.
 		return nil, nil, err
 	}
 
@@ -48,10 +45,9 @@ func open() (pty, tty *os.File, err error) {
 		return nil, nil, err
 	}
 
-	// In case of error after this point, make sure we close the ptmx fd.
 	defer func() {
 		if err != nil {
-			_ = p.Close() // Best effort.
+			_ = p.Close()
 		}
 	}()
 
@@ -74,7 +70,8 @@ func open() (pty, tty *os.File, err error) {
 		return nil, nil, err
 	}
 
-	if _, err = fcntl(uintptr(ptsfd), F_CONTROL_CVT, uintptr(unsafe.Pointer(&cvtreq))); err != nil {
+	if _, err = fcntl(uintptr(ptsfd), fControlCvt, uintptr(unsafe.Pointer(&cvtreq))); err != nil {
+		_ = syscall.Close(ptsfd) // The deferred cleanup closes the master.
 		return nil, nil, err
 	}
 
@@ -87,7 +84,7 @@ func open() (pty, tty *os.File, err error) {
 }
 
 func openpt(oflag int) (fd int, err error) {
-	r0, _, e1 := runtime.CallLeFuncWithErr(runtime.GetZosLibVec()+SYS_POSIX_OPENPT<<4, uintptr(oflag))
+	r0, _, e1 := runtime.CallLeFuncWithErr(runtime.GetZosLibVec()+sysPosixOpenpt<<4, uintptr(oflag))
 	fd = int(r0)
 	if e1 != 0 {
 		err = syscall.Errno(e1)
@@ -96,7 +93,7 @@ func openpt(oflag int) (fd int, err error) {
 }
 
 func fcntl(fd uintptr, cmd int, arg uintptr) (val int, err error) {
-	r0, _, e1 := runtime.CallLeFuncWithErr(runtime.GetZosLibVec()+SYS_FCNTL<<4, uintptr(fd), uintptr(cmd), arg)
+	r0, _, e1 := runtime.CallLeFuncWithErr(runtime.GetZosLibVec()+sysFcntl<<4, uintptr(fd), uintptr(cmd), arg)
 	val = int(r0)
 	if e1 != 0 {
 		err = syscall.Errno(e1)
@@ -105,16 +102,16 @@ func fcntl(fd uintptr, cmd int, arg uintptr) (val int, err error) {
 }
 
 func ptsname(fd int) (name string, err error) {
-	r0, _, e1 := runtime.CallLeFuncWithPtrReturn(runtime.GetZosLibVec()+SYS___PTSNAME_A<<4, uintptr(fd))
-	name = u2s(unsafe.Pointer(r0))
+	r0, _, e1 := runtime.CallLeFuncWithPtrReturn(runtime.GetZosLibVec()+sysPtsname<<4, uintptr(fd))
 	if e1 != 0 {
-		err = syscall.Errno(e1)
+		return "", syscall.Errno(e1)
 	}
-	return
+
+	return u2s(unsafe.Pointer(r0)), nil
 }
 
 func grantpt(fildes int) (rc int, err error) {
-	r0, _, e1 := runtime.CallLeFuncWithErr(runtime.GetZosLibVec()+SYS_GRANTPT<<4, uintptr(fildes))
+	r0, _, e1 := runtime.CallLeFuncWithErr(runtime.GetZosLibVec()+sysGrantpt<<4, uintptr(fildes))
 	rc = int(r0)
 	if e1 != 0 {
 		err = syscall.Errno(e1)
@@ -123,7 +120,7 @@ func grantpt(fildes int) (rc int, err error) {
 }
 
 func unlockpt(fildes int) (rc int, err error) {
-	r0, _, e1 := runtime.CallLeFuncWithErr(runtime.GetZosLibVec()+SYS_UNLOCKPT<<4, uintptr(fildes))
+	r0, _, e1 := runtime.CallLeFuncWithErr(runtime.GetZosLibVec()+sysUnlockpt<<4, uintptr(fildes))
 	rc = int(r0)
 	if e1 != 0 {
 		err = syscall.Errno(e1)

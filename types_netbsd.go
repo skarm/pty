@@ -12,7 +12,7 @@ import "C"
 
 type ptmget C.struct_ptmget
 
-var (
-	ioctl_TIOCPTSNAME = C.TIOCPTSNAME
-	ioctl_TIOCGRANTPT = C.TIOCGRANTPT
+const (
+	ioctlTIOCPTSNAME = C.TIOCPTSNAME
+	ioctlTIOCGRANTPT = C.TIOCGRANTPT
 )

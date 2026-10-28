@@ -15,10 +15,10 @@ func open() (pty, tty *os.File, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	// In case of error after this point, make sure we close the ptmx fd.
+
 	defer func() {
 		if err != nil {
-			_ = p.Close() // Best effort.
+			_ = p.Close()
 		}
 	}()
 
@@ -33,37 +33,32 @@ func open() (pty, tty *os.File, err error) {
 
 	// In NetBSD unlockpt() does nothing, so it isn't called here.
 
-	t, err := os.OpenFile(sname, os.O_RDWR|syscall.O_NOCTTY, 0)
+	t, err := os.OpenFile(sname, os.O_RDWR|syscall.O_NOCTTY, 0) // #nosec G304 -- TIOCPTSNAME supplies the kernel slave path, checked for NUL termination.
 	if err != nil {
 		return nil, nil, err
 	}
+
 	return p, t, nil
 }
 
 func ptsname(f *os.File) (string, error) {
-	/*
-	 * from ptsname(3): The ptsname() function is equivalent to:
-	 * struct ptmget pm;
-	 * ioctl(fd, TIOCPTSNAME, &pm) == -1 ? NULL : pm.sn;
-	 */
+	// TIOCPTSNAME returns the slave path in ptmget.Sn; see ptsname(3).
 	var ptm ptmget
-	if err := ioctl(f, uintptr(ioctl_TIOCPTSNAME), unsafe.Pointer(&ptm)); err != nil {
+	if err := ioctl(f, uintptr(ioctlTIOCPTSNAME), unsafe.Pointer(&ptm)); err != nil { // #nosec G103 -- Synchronous ioctl fills this live ptmget ABI struct.
 		return "", err
 	}
+
 	name := make([]byte, len(ptm.Sn))
 	for i, c := range ptm.Sn {
-		name[i] = byte(c)
+		name[i] = byte(c) // #nosec G115 -- Preserve each signed C char byte without changing its bit pattern.
 		if c == 0 {
 			return string(name[:i]), nil
 		}
 	}
+
 	return "", errors.New("TIOCPTSNAME string not NUL-terminated")
 }
 
 func grantpt(f *os.File) error {
-	/*
-	 * from grantpt(3): Calling grantpt() is equivalent to:
-	 * ioctl(fd, TIOCGRANTPT, 0);
-	 */
-	return ioctl(f, uintptr(ioctl_TIOCGRANTPT), unsafe.Pointer(nil))
+	return ioctl(f, uintptr(ioctlTIOCGRANTPT), nil)
 }

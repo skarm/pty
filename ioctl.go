@@ -1,5 +1,4 @@
-//go:build !windows && go1.12
-// +build !windows,go1.12
+//go:build !windows && !plan9 && !aix
 
 package pty
 
@@ -11,16 +10,16 @@ import (
 func ioctl(f *os.File, cmd uintptr, ptr unsafe.Pointer) error {
 	sc, e := f.SyscallConn()
 	if e != nil {
-		return ioctlInner(f.Fd(), cmd, ptr) // Fall back to blocking io (old behavior).
+		return e
 	}
 
-	ch := make(chan error, 1)
-	defer close(ch)
+	// Control invokes the callback synchronously while keeping the fd valid.
+	var operationErr error
 
-	e = sc.Control(func(fd uintptr) { ch <- ioctlInner(fd, cmd, ptr) })
+	e = sc.Control(func(fd uintptr) { operationErr = ioctlInner(fd, cmd, ptr) })
 	if e != nil {
 		return e
 	}
-	e = <-ch
-	return e
+
+	return operationErr
 }

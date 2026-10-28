@@ -12,4 +12,4 @@ import "C"
 
 type ptmget C.struct_ptmget
 
-var ioctl_PTMGET = C.PTMGET
+const ioctlPTMGET = C.PTMGET

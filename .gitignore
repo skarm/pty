@@ -2,3 +2,15 @@
 _go*
 _test*
 _obj
+.idea/
+.vscode/
+.codegraph/
+.DS_Store
+/local/
+/cache/
+/bin/
+*.test
+/coverage.out
+/coverage.html
+/.cov
+

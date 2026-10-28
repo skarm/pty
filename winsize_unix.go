@@ -1,5 +1,4 @@
-//go:build !windows
-// +build !windows
+//go:build !windows && !plan9 && !aix
 
 package pty
 
@@ -9,27 +8,10 @@ import (
 	"unsafe"
 )
 
-// Winsize describes the terminal size.
-type Winsize struct {
-	Rows uint16 // ws_row: Number of rows (in cells).
-	Cols uint16 // ws_col: Number of columns (in cells).
-	X    uint16 // ws_xpixel: Width in pixels.
-	Y    uint16 // ws_ypixel: Height in pixels.
+func setsize(file *os.File, size *Winsize) error {
+	return ioctl(file, syscall.TIOCSWINSZ, unsafe.Pointer(size)) // #nosec G103 -- Live typed winsize passed synchronously to ioctl.
 }
 
-// Setsize resizes t to s.
-func Setsize(t *os.File, ws *Winsize) error {
-	//nolint:gosec // Expected unsafe pointer for Syscall call.
-	return ioctl(t, syscall.TIOCSWINSZ, unsafe.Pointer(ws))
-}
-
-// GetsizeFull returns the full terminal size description.
-func GetsizeFull(t *os.File) (size *Winsize, err error) {
-	var ws Winsize
-
-	//nolint:gosec // Expected unsafe pointer for Syscall call.
-	if err := ioctl(t, syscall.TIOCGWINSZ, unsafe.Pointer(&ws)); err != nil {
-		return nil, err
-	}
-	return &ws, nil
+func getsize(file *os.File, size *Winsize) error {
+	return ioctl(file, syscall.TIOCGWINSZ, unsafe.Pointer(size)) // #nosec G103 -- Live typed winsize passed synchronously to ioctl.
 }

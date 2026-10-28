@@ -1,60 +1,136 @@
----
 name: Test
 
-"on":
+on:
   push:
-    branches:
-      - master
+    branches: [master]
   pull_request:
-    branches:
-      - master
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GOTOOLCHAIN: local
 
 jobs:
-  test:
-    name: "Test go ${{ matrix.go_version }} on ${{ matrix.platform }}"
+  lint:
+    name: "Lint on ${{ matrix.platform }}"
     runs-on: ${{ matrix.platform }}
-
+    timeout-minutes: 10
     strategy:
+      fail-fast: false
       matrix:
-        platform:
-          - ubuntu-latest
-          - macos-latest
-        go_version:
-          # Test the two currently supported releases.
-          # (https://go.dev/doc/devel/release#policy).
-          - stable
-          - oldstable
-        include:
-          # Also sanity test a very old release on linux.
-          - platform: ubuntu-latest
-            go_version: 1.6.x
-
+        platform: [ubuntu-latest, macos-latest, windows-2025]
     steps:
-      # 1.6 doesn't seem to default GOPATH to anything,
-      # so we set it explicitly here.
-      - if: ${{ matrix.go_version == '1.6.x' }}
-        name: Set GOPATH
-        run: echo "GOPATH=$HOME/go" >> $GITHUB_ENV
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: Check workflows
+        if: runner.os == 'Linux'
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          actionlint -color
+      - name: Lint Go
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+          args: -v ./...
+          verify: true
+          only-new-issues: false
 
-      - name: Set up Go ${{ matrix.go_version }}
-        uses: actions/setup-go@v4
+  test:
+    name: "Go ${{ matrix.go_version }} on ${{ matrix.platform }}"
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-latest, macos-latest]
+        go_version: ['1.26.x', '1.27.x']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go_version }}
           check-latest: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: Go environment
+        run: |
+          go version
+          go env GOOS GOARCH CGO_ENABLED GOTOOLCHAIN
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -v -count=1 -timeout=60s ./...
+      - name: Repeat short tests
+        run: go test -short -count=100 -timeout=30s ./...
+      - name: Race
+        run: go test -race -count=1 -timeout=60s ./...
+      - name: Repeat GC stack-shrink regression
+        if: runner.os == 'Linux'
+        run: go test -run '^TestOpenUnderGCStackShrink$' -count=5 -v -timeout=45s .
 
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Build
-        run: go build -v
-
-      # Skip tests for 1.6 as we use modern Go.
-      # If the main lib builds and tests pass on other versions, we are good.
-      - if: ${{ matrix.go_version != '1.6.x' }}
-        name: Single Test
-        run: go test -v
-
-      # Run the tests again 100 times without verbose.
-      - if: ${{ matrix.go_version != '1.6.x' }}
-        name: Many Tests
-        run: go test -count=100 -timeout=30s
+  windows:
+    name: "Go ${{ matrix.go_version }} on ${{ matrix.platform }}"
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CGO_ENABLED: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-2022, windows-2025]
+        go_version: ['1.26.x', '1.27.x']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go_version }}
+          check-latest: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: Go and C compiler environment
+        run: |
+          go version
+          go env GOOS GOARCH CGO_ENABLED GOTOOLCHAIN CC
+          gcc --version
+      - name: Vet
+        run: go vet ./...
+      - name: Test ConPTY and portable API
+        run: go test -v -count=1 -timeout=60s ./...
+      - name: Race
+        run: go test -race -count=1 -timeout=60s ./...
+      - name: Repeat terminal lifecycle tests
+        run: go test -run '^TestTerminal' -count=5 -timeout=60s ./...
