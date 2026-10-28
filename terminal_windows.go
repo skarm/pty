@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -85,7 +86,14 @@ func (t *windowsTerminal) Start(ctx context.Context, command Command) (*Process,
 	return manageProcess(ctx, process, process.Wait, t.Close, t.finish), nil
 }
 
-func (t *windowsTerminal) Read(buf []byte) (int, error)  { return t.output.Read(buf) }
+func (t *windowsTerminal) Read(buf []byte) (int, error) {
+	if t.closed.Load() {
+		return 0, os.ErrClosed
+	}
+
+	return t.output.Read(buf)
+}
+
 func (t *windowsTerminal) Write(buf []byte) (int, error) { return t.input.Write(buf) }
 
 func (t *windowsTerminal) Resize(size Winsize) error {
@@ -124,14 +132,33 @@ func (t *windowsTerminal) Size() (Winsize, error) {
 func (t *windowsTerminal) Close() error {
 	t.closeOnce.Do(func() {
 		t.closed.Store(true)
-		// The host endpoints are overlapped: Close cancels outstanding I/O.
-		// Close output before ClosePseudoConsole, which can otherwise block while
-		// flushing its final frame on Windows releases before 11 24H2.
-		t.closeErr = errors.Join(t.output.Close(), t.input.Close())
-		t.finish()
+		// Abort input immediately, but keep draining output while the native
+		// console close flushes its final frame on synchronous Windows versions.
+		t.closeErr = errors.Join(t.input.Close(), closeConsoleOutput(t.output, t.finish))
 	})
 
 	return t.closeErr
+}
+
+// closeConsoleOutput also releases a finish already blocked flushing output.
+// The reader stays open until finish returns; closing it then aborts any reads
+// still pending after an asynchronous ClosePseudoConsole.
+func closeConsoleOutput(output *os.File, finish func()) error {
+	drained := make(chan struct{})
+
+	go func() {
+		_, _ = io.Copy(io.Discard, output)
+
+		close(drained)
+	}()
+
+	finish()
+
+	err := output.Close()
+
+	<-drained
+
+	return err
 }
 
 func (t *windowsTerminal) finish() {

@@ -28,6 +28,8 @@ terminal, err := pty.Open()
 - `Start(ctx, Command) (*Process, error)` — attach one child process.
 - `Resize(Winsize) error` — change terminal dimensions.
 - `Size() (Winsize, error)` — read the current dimensions.
+- `SetMode(Mode) error` — configure echo and canonical input before Start on
+  Linux and macOS; other platforms return `ErrUnsupported`.
 - `Close() error` — release terminal resources; repeated calls are safe.
 
 `Command` contains `Path`, `Args`, `Dir` and `Env`. `Args` excludes the program
@@ -37,10 +39,15 @@ replaces it. Windows preserves required `SYSTEMROOT`. Use absolute paths for
 Windows drive-relative executable names. Environment entries containing NUL
 are rejected; Windows also rejects malformed name=value entries.
 
-`Process` provides `PID() int`, `Kill() error` and
+`Process` provides `PID() int`, `Kill() error`, `Stop(ctx) error` and
 `Wait() (*os.ProcessState, error)`. Wait is safe to call repeatedly or
 concurrently. A nonzero exit status returns an `*exec.ExitError`. The library
 reaps the child even if Wait is not called.
+
+On Unix, Stop sends SIGTERM to the direct child and waits; if its context
+expires, Stop kills and reaps the child and returns the context error. It does
+not terminate descendants or close the terminal. Windows returns ErrUnsupported
+for Stop because ConPTY has no equivalent portable graceful signal.
 
 ## Example
 
@@ -108,8 +115,11 @@ Canceling its context while the child is running kills the child and closes the
 terminal. After the child exits, use Close to abort any remaining output I/O.
 Kill terminates the child process; it does not replace closing the terminal.
 
-Wait reports the process result independently of output consumption. Read to
-EOF before Close to preserve all final output. Close discards unread output.
+Wait reports the process result independently of output consumption. Read
+concurrently while the child runs and continue to EOF before Close. Close
+discards unread output. Some Unix systems can discard unread PTY output during
+terminal teardown when a short-lived child exits, so reading to EOF cannot
+guarantee preservation of bytes not yet read from the kernel.
 Always close the terminal, including when Start fails.
 
 ## Platforms
@@ -121,9 +131,9 @@ both to be zero. Windows Size returns the last successfully requested size,
 since ConPTY does not expose a size query. Windows output is UTF-8 with virtual
 terminal escape sequences.
 
-On Darwin, terminal I/O is blocking. Close may wait for an outstanding read to
-finish. Process exit or cancellation normally releases a read when the child
-owns the last slave descriptor.
+On Darwin, Open requires a pollable master and fails if Go's poller cannot
+register it. Close can interrupt an outstanding read even while the child holds
+the slave open.
 
 Plan 9 and AIX return `ErrUnsupported`.
 

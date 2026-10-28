@@ -4,9 +4,11 @@ package pty
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -18,20 +20,22 @@ var ptmxOpenMu sync.Mutex
 
 func open() (pty, tty *os.File, err error) {
 	ptmxOpenMu.Lock()
-	pFD, err := syscall.Open("/dev/ptmx", syscall.O_RDWR|syscall.O_CLOEXEC, 0)
+	p, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
 	ptmxOpenMu.Unlock()
 
 	if err != nil {
 		return nil, nil, err
 	}
 
-	p := os.NewFile(uintptr(pFD), "/dev/ptmx")
-
 	defer func() {
 		if err != nil {
 			_ = p.Close()
 		}
 	}()
+
+	if err = requirePollableMaster(p); err != nil {
+		return nil, nil, err
+	}
 
 	sname, err := ptsname(p)
 	if err != nil {
@@ -75,6 +79,16 @@ func open() (pty, tty *os.File, err error) {
 	}
 
 	return p, t, nil
+}
+
+// os.OpenFile may silently fall back to blocking I/O if poll registration fails.
+// An empty deadline checks poll support without imposing an I/O timeout.
+func requirePollableMaster(master *os.File) error {
+	if err := master.SetDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("pty: Darwin master is not pollable: %w", err)
+	}
+
+	return nil
 }
 
 func ptsname(f *os.File) (string, error) {
