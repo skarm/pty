@@ -228,9 +228,6 @@ func TestTerminalCloseUnblocksRead(t *testing.T) {
 
 // TestTerminalCloseWithActiveRead keeps the child slave open during Close.
 func TestTerminalCloseWithActiveRead(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("Darwin documents blocking terminal I/O")
-	}
 	if testing.Short() {
 		t.Skip("active-read teardown uses a subprocess and a blocking-read fixture")
 	}
@@ -300,6 +297,76 @@ func TestTerminalCloseWithUnreadOutput(t *testing.T) {
 	_, _ = process.Wait()
 }
 
+// Drain while the child is alive: some Unix kernels can discard unread bytes
+// during session teardown, so reading only after Wait cannot guarantee delivery.
+func TestTerminalDrainsOutputBeforeExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ConPTY output is a rendered VT stream, not the child's byte stream")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	term := newTerminal(t)
+	process, err := term.Start(ctx, terminalFixture(t, "burst"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Repeat("x", 64<<10)
+	got := make([]byte, len(want))
+	if _, err := io.ReadFull(term, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatal("output changed or lost while draining")
+	}
+	if _, err := term.Write([]byte("done\r")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, term); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Wait(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ConPTY emits screen updates rather than a byte-for-byte copy of writes.
+// Drain while the child emits enough output to exercise the bounded pipes.
+func TestTerminalDrainsConPTYBeforeExit(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("ConPTY is only available on Windows")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	term := newTerminal(t)
+	process, err := term.Start(ctx, terminalFixture(t, "burst"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		n   int64
+		err error
+	}
+	output := make(chan result, 1)
+	go func() {
+		n, err := io.Copy(io.Discard, term)
+		output <- result{n, err}
+	}()
+	if _, err := io.WriteString(term, "done\r"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-output:
+		if got.err != nil || got.n == 0 {
+			t.Fatalf("drain: bytes=%d error=%v", got.n, got.err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("output did not reach EOF: %v", ctx.Err())
+	}
+}
+
 // TestReadDeadline observes the Unix backend deadline through a test-only hook:
 // outstanding reads must be interrupted by their deadline.
 // See https://github.com/creack/pty/issues/162 (fixed upstream by PR #167).
@@ -308,7 +375,7 @@ func TestReadDeadline(t *testing.T) {
 
 	file, _ := pty.NativeFiles(ptmx)
 	if err := file.SetDeadline(time.Now().Add(timeout / 10)); err != nil {
-		if errors.Is(err, os.ErrNoDeadline) {
+		if errors.Is(err, os.ErrNoDeadline) && runtime.GOOS != "darwin" {
 			t.Skipf("Deadline is not supported on %s/%s.", runtime.GOOS, runtime.GOARCH)
 		}
 
@@ -318,12 +385,8 @@ func TestReadDeadline(t *testing.T) {
 	buf := make([]byte, 1)
 	n, err := ptmx.Read(buf)
 	success()
-	if err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("Unexpected read error: %s.", err)
-	}
-
-	if n != 0 && buf[0] != errMarker {
-		t.Errorf("Received unexpected data from ptmx (%d bytes): 0x%X; err=%v.", n, buf, err)
+	if n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("expected deadline without data, got %d bytes; error=%v", n, err)
 	}
 }
 
@@ -380,6 +443,25 @@ func TestTerminalHelperProcess(t *testing.T) {
 	case "flood":
 		fmt.Print(strings.Repeat("x", 4<<20))
 		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	case "burst":
+		fmt.Print(strings.Repeat("x", 64<<10))
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	case "dialog":
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print("PROMPT>")
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			os.Exit(6)
+		}
+		fmt.Print("ANSWER:" + strings.TrimSpace(line) + ":END")
+		_, _ = reader.ReadString('\n')
+	case "single":
+		var input [1]byte
+		if _, err := io.ReadFull(os.Stdin, input[:]); err != nil {
+			os.Exit(7)
+		}
+		fmt.Print("RECEIVED:" + string(input[:]))
+		_, _ = io.ReadFull(os.Stdin, input[:])
 	default:
 		os.Exit(5)
 	}
@@ -514,16 +596,11 @@ func terminalFixture(t *testing.T, mode string, extra ...string) pty.Command {
 // prepareReadTest opens a terminal and installs watchdogs for Unix poller tests.
 func prepareReadTest(t *testing.T) (ptmx *pty.Terminal, done func()) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("deadline and close regressions wait for timers")
+	}
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix poller regression; Windows has portable lifecycle tests")
-	}
-
-	if runtime.GOOS == "darwin" {
-		// The blocking master avoids the poller busy loop reported in:
-		// https://github.com/creack/pty/issues/52
-		// https://github.com/creack/pty/pull/53
-		// https://github.com/golang/go/issues/22099
-		t.Skip("Darwin uses a blocking master; see creack/pty#52 and PR #53")
 	}
 
 	ptmx = newTerminal(t)

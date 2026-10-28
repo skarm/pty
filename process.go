@@ -2,6 +2,7 @@ package pty
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 )
@@ -45,6 +46,54 @@ func (p *Process) Kill() error {
 	}
 
 	return p.process.Kill()
+}
+
+// Stop requests a graceful exit and waits for the child. If ctx expires while
+// waiting, it kills the child and waits for it to be reaped, then returns the
+// context error. Stop only affects the direct child, not its descendants. On
+// platforms without a graceful termination signal it returns ErrUnsupported.
+func (p *Process) Stop(ctx context.Context) error {
+	if p == nil || p.process == nil || p.done == nil || ctx == nil {
+		return os.ErrInvalid
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	select {
+	case <-p.done:
+		return p.err
+	default:
+	}
+
+	if err := terminateProcess(p.process); err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
+			<-p.done
+			return p.err
+		}
+
+		return err
+	}
+
+	select {
+	case <-p.done:
+		return p.err
+	case <-ctx.Done():
+		select {
+		case <-p.done:
+			return p.err
+		default:
+		}
+
+		if err := p.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return errors.Join(ctx.Err(), err)
+		}
+
+		<-p.done
+
+		return ctx.Err()
+	}
 }
 
 // Wait returns the exit state and error. An unsuccessful exit returns an

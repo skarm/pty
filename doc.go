@@ -24,7 +24,10 @@
 // background even when Wait is not called. [Process.Kill] terminates the child;
 // the terminal must still be closed.
 //
-// Read to EOF before [Terminal.Close] to preserve final output. Close releases
+// Read concurrently while the child runs and continue to EOF before
+// [Terminal.Close]. Some Unix systems can discard unread output during terminal
+// teardown, so reading to EOF cannot guarantee preservation of every byte.
+// Close releases
 // terminal resources, discards unread output and is idempotent. Always close
 // a terminal, including when Start fails. Canceling the Start context while
 // the child is running kills the child and closes the terminal. After process
@@ -38,9 +41,8 @@
 // returns the last successfully requested size because ConPTY has no size query.
 //
 // Windows requires Windows 10 1809 or Windows Server 2019 or later. ConPTY
-// streams are UTF-8. On Darwin, terminal I/O is blocking: Close may wait for an
-// outstanding read to finish. Process exit or cancellation normally releases
-// a read when the child owns the last slave descriptor.
+// streams are UTF-8. On Darwin, Close interrupts an outstanding master read
+// even while the child holds the slave open.
 //
 // Plan 9 and AIX return [ErrUnsupported].
 //

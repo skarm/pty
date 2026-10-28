@@ -1,0 +1,2 @@
+# Keep text checkouts consistent with .editorconfig and Go formatters on Windows.
+* text=auto eol=lf

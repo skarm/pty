@@ -14,9 +14,27 @@ var ErrUnsupported = errors.New("unsupported")
 // Terminal is a bidirectional terminal with independent process and I/O lifetimes.
 // Each terminal can start one command. Read and Write may run concurrently with
 // each other, Resize, and Close. Close aborts I/O and discards unread output;
-// read to EOF before closing when all final output is needed.
-// Darwin uses blocking terminal I/O; Close may wait for a read to finish.
+// read concurrently and continue to EOF before closing. Some Unix systems can
+// discard unread output during terminal teardown after the child exits.
 type Terminal struct{ driver terminalDriver }
+
+// Mode controls input line processing for a terminal before Start. Disabling
+// Canonical makes input available one byte at a time; Echo controls local echo.
+type Mode struct{ Echo, Canonical bool }
+
+// SetMode configures the slave before Start. It is supported on Linux and
+// Darwin; other platforms return ErrUnsupported. Other terminal flags are kept.
+func (t *Terminal) SetMode(mode Mode) error {
+	if t == nil || t.driver == nil {
+		return os.ErrInvalid
+	}
+
+	if driver, ok := t.driver.(interface{ SetMode(Mode) error }); ok {
+		return driver.SetMode(mode)
+	}
+
+	return ErrUnsupported
+}
 
 type terminalDriver interface {
 	io.ReadWriteCloser
@@ -28,6 +46,7 @@ type terminalDriver interface {
 // Open creates a terminal with 80 columns and 24 rows on Unix or Windows.
 // Call [Terminal.Resize] before [Terminal.Start] to select another initial size.
 // Windows requires ConPTY (Windows 10 1809 or later).
+// On Darwin, Open fails if the master cannot be registered with Go's poller.
 func Open() (*Terminal, error) {
 	driver, err := openTerminal(Winsize{Rows: 24, Cols: 80})
 	if err != nil {
@@ -105,7 +124,6 @@ func (t *Terminal) Size() (Winsize, error) {
 
 // Close releases terminal resources and discards unread output. It is idempotent.
 // On Windows, Close interrupts pending I/O and terminates attached console clients.
-// On Darwin, Close may wait for an outstanding read to finish.
 func (t *Terminal) Close() error {
 	if t == nil || t.driver == nil {
 		return os.ErrInvalid
