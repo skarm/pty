@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -435,6 +436,18 @@ func TestTerminalHelperProcess(t *testing.T) {
 			os.Exit(4)
 		}
 		fmt.Println("PTY_RESULT:" + string(data))
+	case "interrupt":
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, os.Interrupt)
+		if err := prepareInterruptFixture(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(87)
+		}
+		fmt.Println("INTERRUPT_READY")
+		<-signals
+		signal.Stop(signals)
+		fmt.Println("INTERRUPT_RECEIVED")
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 	case "exit":
 		os.Exit(23)
 	case "hold":

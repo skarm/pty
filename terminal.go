@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 )
 
 // ErrUnsupported is returned when an operation is unavailable on the platform.
@@ -16,7 +17,10 @@ var ErrUnsupported = errors.New("unsupported")
 // each other, Resize, and Close. Close aborts I/O and discards unread output;
 // read concurrently and continue to EOF before closing. Some Unix systems can
 // discard unread output during terminal teardown after the child exits.
-type Terminal struct{ driver terminalDriver }
+type Terminal struct {
+	driver    terminalDriver
+	writeGate chan struct{}
+}
 
 // Mode controls input line processing for a terminal before Start. Disabling
 // Canonical makes input available one byte at a time; Echo controls local echo.
@@ -41,6 +45,9 @@ type terminalDriver interface {
 	Resize(Winsize) error
 	Size() (Winsize, error)
 	Start(context.Context, Command) (*Process, error)
+	SetWriteDeadline(time.Time) error
+	interrupt() error
+	eofByte() (byte, error)
 }
 
 // Open creates a terminal with 80 columns and 24 rows on Unix or Windows.
@@ -53,7 +60,7 @@ func Open() (*Terminal, error) {
 		return nil, err
 	}
 
-	return &Terminal{driver: driver}, nil
+	return &Terminal{driver: driver, writeGate: make(chan struct{}, 1)}, nil
 }
 
 // Start attaches one process to the terminal. It does not invoke a shell.
@@ -92,11 +99,7 @@ func (t *Terminal) Read(buf []byte) (int, error) {
 
 // Write sends terminal input.
 func (t *Terminal) Write(buf []byte) (int, error) {
-	if t == nil || t.driver == nil {
-		return 0, os.ErrInvalid
-	}
-
-	return t.driver.Write(buf)
+	return t.WriteContext(context.Background(), buf)
 }
 
 // Resize changes the terminal dimensions. Windows rejects nonzero pixel sizes.
