@@ -54,6 +54,11 @@ func (t *unixTerminal) Start(ctx context.Context, command Command) (*Process, er
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = t.slave, t.slave, t.slave
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}

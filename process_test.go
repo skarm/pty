@@ -32,6 +32,39 @@ func TestTerminalExitStatus(t *testing.T) {
 	}
 }
 
+type cancelAfterStartCheck struct {
+	context.Context
+	cancel context.CancelFunc
+}
+
+func (ctx cancelAfterStartCheck) Err() error {
+	err := ctx.Context.Err()
+	ctx.cancel()
+	return err
+}
+
+func TestTerminalStartCanceledBeforeLaunch(t *testing.T) {
+	term := newTerminal(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	command := terminalFixture(t, "exit")
+	process, err := term.Start(cancelAfterStartCheck{Context: ctx, cancel: cancel}, command)
+	if process != nil {
+		_, _ = process.Wait()
+	}
+	if process != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Start: process=%v err=%v", process, err)
+	}
+	process, err = term.Start(t.Context(), command)
+	if err != nil {
+		t.Fatalf("retry after cancellation: %v", err)
+	}
+	state, err := process.Wait()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || state == nil || state.ExitCode() != 23 {
+		t.Fatalf("retry result: state=%v err=%v", state, err)
+	}
+}
+
 func TestTerminalCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

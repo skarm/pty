@@ -84,7 +84,13 @@ func (t *Terminal) writeWithDeadline(ctx context.Context, operation func() (int,
 
 		close(canceled)
 	})
-	n, err := operation()
+
+	var n int
+
+	err := ctx.Err()
+	if err == nil {
+		n, err = operation()
+	}
 
 	if !stop() {
 		<-canceled

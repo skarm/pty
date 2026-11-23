@@ -76,7 +76,7 @@ func (t *windowsTerminal) Start(ctx context.Context, command Command) (*Process,
 		return nil, errors.New("pty: terminal already started")
 	}
 
-	process, err := startConsoleProcess(t.console, command)
+	process, err := startConsoleProcess(ctx, t.console, command)
 	if err != nil {
 		return nil, err
 	}

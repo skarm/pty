@@ -1,6 +1,7 @@
 package pty
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -13,7 +14,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func startConsoleProcess(console windows.Handle, command Command) (*os.Process, error) {
+func startConsoleProcess(ctx context.Context, console windows.Handle, command Command) (*os.Process, error) {
 	//nolint:noctx // Process owns context cancellation; this Cmd is used only for path/environment preparation.
 	cmd := exec.Command(command.Path, command.Args...) // #nosec G204 -- Starting the caller-specified executable is the API contract.
 
@@ -96,6 +97,11 @@ func startConsoleProcess(console windows.Handle, command Command) (*os.Process, 
 	// Adopt the process before resuming so a fast child cannot exit before
 	// os.FindProcess acquires its own process handle. No handles are inherited.
 	flags := uint32(windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_UNICODE_ENVIRONMENT | windows.CREATE_SUSPENDED)
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if err := windows.CreateProcess(application, line, nil, nil, false, flags, &environment[0], directory, &startup.StartupInfo, &info); err != nil {
 		return nil, err
 	}

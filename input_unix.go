@@ -5,14 +5,16 @@ package pty
 import (
 	"errors"
 	"os"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
 
 func (t *unixTerminal) interrupt() error {
 	return t.controlInput(func(fd int) error {
-		group, err := unix.IoctlGetInt(fd, unix.TIOCGPGRP)
-		if err != nil {
+		// TIOCGPGRP writes a 32-bit pid_t even on 64-bit kernels.
+		var group int32
+		if err := ioctlInner(uintptr(fd), unix.TIOCGPGRP, unsafe.Pointer(&group)); err != nil { // #nosec G103 -- Live pid_t storage and a descriptor held by controlInput.
 			return err
 		}
 
@@ -21,11 +23,11 @@ func (t *unixTerminal) interrupt() error {
 			return err
 		}
 
-		if group <= 0 || group == caller {
+		if group <= 0 || int(group) == caller {
 			return os.ErrInvalid
 		}
 
-		return unix.Kill(-group, unix.SIGINT)
+		return unix.Kill(-int(group), unix.SIGINT)
 	})
 }
 

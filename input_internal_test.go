@@ -40,6 +40,40 @@ func newInputPipe(t *testing.T) (*Terminal, *fileInputDriver, *os.File) {
 	return &Terminal{driver: driver, writeGate: make(chan struct{}, 1)}, driver, reader
 }
 
+type cancelWhenArmingDriver struct {
+	terminalDriver
+	cancel context.CancelFunc
+}
+
+func (d cancelWhenArmingDriver) SetWriteDeadline(deadline time.Time) error {
+	if !deadline.IsZero() {
+		d.cancel()
+	}
+	return d.terminalDriver.SetWriteDeadline(deadline)
+}
+
+func TestWriteContextCanceledWhileArmingDeadline(t *testing.T) {
+	terminal, driver, reader := newInputPipe(t)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	terminal.driver = cancelWhenArmingDriver{terminalDriver: driver, cancel: cancel}
+	n, err := terminal.WriteContext(ctx, []byte("discard"))
+	if n != 0 || !errors.Is(err, context.Canceled) || driver.calls.Load() != 0 {
+		t.Fatalf("canceled writer reached input: n=%d err=%v calls=%d", n, err, driver.calls.Load())
+	}
+	const marker = "AFTER_CANCEL"
+	if n, err := terminal.Write([]byte(marker)); n != len(marker) || err != nil {
+		t.Fatalf("write after cancellation: %d, %v", n, err)
+	}
+	if err := driver.input.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if string(data) != marker || err != nil {
+		t.Fatalf("read after cancellation: %q, %v", data, err)
+	}
+}
+
 func TestWriteContextCancelsBlockedIOWithoutClosingInput(t *testing.T) {
 	terminal, driver, reader := newInputPipe(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
